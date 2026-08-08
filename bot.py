@@ -28,7 +28,10 @@ DB_PATH = "shop.db"
 AMOUNT, COIN = range(2)
 
 COINS = {
-    "usdttrc20": "USDT (TRC20)",
+    "usdttrc20": "USDT TRC20 (Tron) – Recommended",
+    "usdterc20": "USDT ERC20 (Ethereum)",
+    "usdtbsc": "USDT BEP20 (BNB Chain)",
+    "usdtsol": "USDT Solana",
     "btc": "Bitcoin (BTC)",
     "eth": "Ethereum (ETH)",
     "ltc": "Litecoin (LTC)",
@@ -120,6 +123,27 @@ def verify_ipn_signature(payload: dict, signature: str) -> bool:
     ).hexdigest()
     return hmac.compare_digest(digest, signature)
 
+##  minimum fixed
+
+def get_min_amount(pay_currency: str, is_fixed_rate: bool = True) -> float:
+    """Returns the minimum amount in USD for the selected currency"""
+    url = "https://api.nowpayments.io/v1/min-amount"
+    headers = {"x-api-key": NOWPAYMENTS_API_KEY}
+    params = {
+        "currency_from": "usd",
+        "currency_to": pay_currency,
+        "fiat_equivalent": "usd",
+        "is_fixed_rate": str(is_fixed_rate).lower()
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data.get("fiat_equivalent", 5))
+    except Exception as e:
+        logger.error(f"Min amount check failed: {e}")
+        return 20.0  # safe fallback
+
 # ==================== TELEGRAM HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_balance(update.effective_user.id)
@@ -164,10 +188,22 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     coin_code = query.data.replace("coin_", "")
     amount = context.user_data.get("topup_amount")
     user_id = query.from_user.id
-    order_id = f"topup_{user_id}_{int(query.message.date.timestamp())}"
 
-    # Your Railway public URL + /ipn
-    # Replace with your real domain after first deploy
+    # Check real minimum amount
+    min_amount = get_min_amount(coin_code, is_fixed_rate=True)
+
+    if amount < min_amount:
+        await query.message.reply_text(
+            f"❌ Amount too low for **{COINS.get(coin_code, coin_code)}**.\n\n"
+            f"Minimum required: **${min_amount:.2f}**\n"
+            f"You entered: **${amount:.2f}**\n\n"
+            f"Please start Top-up again with a higher amount.",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return ConversationHandler.END
+
+    order_id = f"topup_{user_id}_{int(query.message.date.timestamp())}"
     ipn_url = os.getenv("IPN_URL", "https://your-service.up.railway.app/ipn")
 
     try:
@@ -195,12 +231,21 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Balance will be credited automatically after confirmation."
         )
 
-        await query.message.reply_photo(photo=qr_url, caption=text, parse_mode="Markdown")
-        await query.message.reply_text("You can return to the main menu anytime.", reply_markup=main_keyboard())
+        await query.message.reply_photo(
+            photo=qr_url,
+            caption=text,
+            parse_mode="Markdown"
+        )
+        await query.message.reply_text(
+            "You can return to the main menu anytime.",
+            reply_markup=main_keyboard()
+        )
 
     except Exception as e:
         logger.error(f"Payment creation error: {e}")
-        await query.message.reply_text("❌ Failed to create payment. Please try again later.")
+        await query.message.reply_text(
+            "❌ Failed to create payment. Please try again later or choose another coin."
+        )
 
     return ConversationHandler.END
 
