@@ -213,6 +213,9 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payment_id = str(payment["payment_id"])
         currency = payment["pay_currency"].upper()
 
+        # Round to max 2 decimal places
+        display_amount = round(float(pay_amount), 2)
+
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO pending_payments (payment_id, user_id, amount) VALUES (?, ?, ?)",
@@ -222,17 +225,14 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         qr_url = generate_qr_url(pay_address)
 
-        # Round to max 2 decimal places for clean display
-display_amount = round(float(pay_amount), 2)
-
-text = (
-    f"✅ Payment created\n\n"
-    f"Amount to send: **{display_amount} {currency}**\n"
-    f"Network: {COINS.get(coin_code, coin_code)}\n\n"
-    f"**Address (tap to copy):**\n`{pay_address}`\n\n"
-    f"Send exactly the amount above.\n"
-    f"Balance will be credited automatically after confirmation."
-)
+        text = (
+            f"✅ Payment created\n\n"
+            f"Amount to send: **{display_amount} {currency}**\n"
+            f"Network: {COINS.get(coin_code, coin_code)}\n\n"
+            f"**Address (tap to copy):**\n`{pay_address}`\n\n"
+            f"Send exactly the amount above.\n"
+            f"Balance will be credited automatically after confirmation."
+        )
 
         await query.message.reply_photo(
             photo=qr_url,
