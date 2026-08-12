@@ -506,7 +506,7 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^➕ Top-up$"), topup_start)],
         states={
             AMOUNT: [
-                MessageHandler(filters.TEXT & \~filters.COMMAND, receive_amount)
+                MessageHandler(filters.TEXT & filters.Regex(r"^[^/].*"), receive_amount)
             ],
             COIN: [
                 CallbackQueryHandler(receive_coin, pattern="^coin_"),
@@ -519,7 +519,7 @@ async def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
-    app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^[^/].*"), handle_text))
 
     # Web server for IPN
     web_app = web.Application()
@@ -540,7 +540,3 @@ async def main():
 
     # Keep running
     await asyncio.Event().wait()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
