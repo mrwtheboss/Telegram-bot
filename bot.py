@@ -201,7 +201,8 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < 5:
             await update.message.reply_text("Minimum deposit is **$5**. Please try again.")
             return AMOUNT
-                context.user_data["topup_amount"] = amount
+
+        context.user_data["topup_amount"] = amount
         
         # Get last used coin
         last_coin = context.user_data.get("last_coin")
@@ -212,6 +213,7 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return COIN
+
     except ValueError:
         await update.message.reply_text("Please enter a valid number (e.g. 10 or 25.5)")
         return AMOUNT
