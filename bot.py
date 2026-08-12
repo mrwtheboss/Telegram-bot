@@ -279,7 +279,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🎮 Game Keys":
         await update.message.reply_text("🎮 Game Keys catalog coming soon…")
     elif text == "🆘 Support":
-        await update.message.reply_text("Contact support: @YourSupportUsername")
+    await update.message.reply_text(
+        "🆘 Customer Support\n\n"
+        "Please contact: @chenxiang888\n"
+        "Direct link: https://t.me/chenxiang888"
+    )
     else:
         await update.message.reply_text("Please use the menu buttons.")
         
