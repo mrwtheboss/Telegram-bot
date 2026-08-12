@@ -246,8 +246,7 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Get estimate
     estimated = get_estimate(amount, coin_code)
-    estimate_text = f"≈ **{round(estimated, 6)} {coin_code.upper()}**" if estimated else "Calculating..."
-
+    estimate_text = f"≈ **{round(estimated)} {coin_code.upper()}**" if estimated else "Calculating..."
     # Ask for confirmation
     confirm_keyboard = InlineKeyboardMarkup([
         [
@@ -306,7 +305,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payment_id = str(payment["payment_id"])
         currency = payment["pay_currency"].upper()
 
-        display_amount = round(float(pay_amount), 2)
+        display_amount = round(float(pay_amount))
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
