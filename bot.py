@@ -336,6 +336,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ==================== IPN WEBHOOK ====================
+
 async def ipn_handler(request: web.Request):
     try:
         payload = await request.json()
@@ -347,45 +348,51 @@ async def ipn_handler(request: web.Request):
 
         payment_id = str(payload.get("payment_id"))
         status = payload.get("payment_status")
-        order_id = payload.get("order_id", "")
 
         logger.info(f"IPN received: {payment_id} → {status}")
 
         if status in ["finished", "confirmed"]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT user_id, amount, status FROM pending_payments WHERE payment_id = ?",
-            (payment_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT user_id, amount, status FROM pending_payments WHERE payment_id = ?",
+                    (payment_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
 
-        if row and row[2] != "finished":
-            user_id, amount, _ = row
-            await add_balance(user_id, amount)
-            await db.execute(
-                "UPDATE pending_payments SET status = 'finished' WHERE payment_id = ?",
-                (payment_id,)
-            )
-            await db.commit()
-            logger.info(f"Credited ${amount} to user {user_id}")
-
-            # === ADMIN NOTIFICATION ===
-            try:
-                from telegram import Bot
-                bot = Bot(token=BOT_TOKEN)
-                for admin_id in ADMIN_IDS:
-                    await bot.send_message(
-                        chat_id=admin_id,
-                        text=(
-                            f"💰 *New Top-up Received!*\n\n"
-                            f"User ID: `{user_id}`\n"
-                            f"Amount: *${amount:.2f}*\n"
-                            f"Payment ID: `{payment_id}`"
-                        ),
-                        parse_mode="Markdown"
+                if row and row[2] != "finished":
+                    user_id, amount, _ = row
+                    await add_balance(user_id, amount)
+                    await db.execute(
+                        "UPDATE pending_payments SET status = 'finished' WHERE payment_id = ?",
+                        (payment_id,)
                     )
-            except Exception as e:
-             logger.error(f"Failed to send admin notification: {e}")
+                    await db.commit()
+                    logger.info(f"Credited ${amount} to user {user_id}")
+
+                    # Admin notification
+                    try:
+                        from telegram import Bot
+                        bot = Bot(token=BOT_TOKEN)
+                        for admin_id in ADMIN_IDS:
+                            await bot.send_message(
+                                chat_id=admin_id,
+                                text=(
+                                    f"💰 *New Top-up Received!*\n\n"
+                                    f"User ID: `{user_id}`\n"
+                                    f"Amount: *${amount:.2f}*\n"
+                                    f"Payment ID: `{payment_id}`"
+                                ),
+                                parse_mode="Markdown"
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to send admin notification: {e}")
+
+        return web.Response(text="OK")
+
+    except Exception as e:
+        logger.error(f"IPN error: {e}")
+        return web.Response(status=500, text="Error")
+        
                 
 # ==================== MAIN ====================
 async def main():
