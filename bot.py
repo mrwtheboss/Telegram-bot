@@ -20,6 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
 PORT = int(os.getenv("PORT", 8080))
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,32 @@ COINS = {
 }
 
 # ==================== DATABASE ====================
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+
+def get_estimate(amount_usd: float, pay_currency: str) -> float | None:
+    """Get estimated crypto amount"""
+    url = "https://api.nowpayments.io/v1/estimate"
+    headers = {"x-api-key": NOWPAYMENTS_API_KEY}
+    params = {
+        "amount": amount_usd,
+        "currency_from": "usd",
+        "currency_to": pay_currency
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data.get("estimated_amount", 0))
+    except Exception as e:
+        logger.error(f"Estimate error: {e}")
+        return None
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -84,9 +111,13 @@ def main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def coin_keyboard():
-    buttons = [[InlineKeyboardButton(name, callback_data=f"coin_{code}")]
-               for code, name in COINS.items()]
+def coin_keyboard(last_coin: str = None):
+    buttons = []
+    for code, name in COINS.items():
+        prefix = "✅ " if code == last_coin else ""
+        buttons.append([InlineKeyboardButton(f"{prefix}{name}", callback_data=f"coin_{code}")])
+    
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_topup")])
     return InlineKeyboardMarkup(buttons)
 
 # ==================== NOWPAYMENTS ====================
@@ -170,10 +201,14 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < 5:
             await update.message.reply_text("Minimum deposit is **$5**. Please try again.")
             return AMOUNT
-        context.user_data["topup_amount"] = amount
+                context.user_data["topup_amount"] = amount
+        
+        # Get last used coin
+        last_coin = context.user_data.get("last_coin")
+        
         await update.message.reply_text(
             f"Amount: **${amount:.2f}**\n\nSelect the cryptocurrency:",
-            reply_markup=coin_keyboard(),
+            reply_markup=coin_keyboard(last_coin),
             parse_mode="Markdown"
         )
         return COIN
@@ -185,73 +220,51 @@ async def receive_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    if query.data == "cancel_topup":
+        await query.message.reply_text("Top-up cancelled.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
     coin_code = query.data.replace("coin_", "")
     amount = context.user_data.get("topup_amount")
     user_id = query.from_user.id
 
-    # Check real minimum amount
-    min_amount = get_min_amount(coin_code, is_fixed_rate=True)
+    # Remember this coin
+    context.user_data["last_coin"] = coin_code
 
+    # Check minimum
+    min_amount = get_min_amount(coin_code, is_fixed_rate=True)
     if amount < min_amount:
         await query.message.reply_text(
-            f"❌ Amount too low for **{COINS.get(coin_code, coin_code)}**.\n\n"
-            f"Minimum required: **${min_amount:.2f}**\n"
-            f"You entered: **${amount:.2f}**\n\n"
-            f"Please start Top-up again with a higher amount.",
+            f"❌ Minimum for **{COINS.get(coin_code)}** is **${min_amount:.2f}**\n"
+            f"You entered: **${amount:.2f}**\n\nPlease start again.",
             parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
         return ConversationHandler.END
 
-    order_id = f"topup_{user_id}_{int(query.message.date.timestamp())}"
-    ipn_url = os.getenv("IPN_URL", "https://your-service.up.railway.app/ipn")
+    # Get estimate
+    estimated = get_estimate(amount, coin_code)
+    estimate_text = f"≈ **{round(estimated, 6)} {coin_code.upper()}**" if estimated else "Calculating..."
 
-    try:
-        payment = create_payment(amount, coin_code, order_id, ipn_url)
-        pay_address = payment["pay_address"]
-        pay_amount = payment["pay_amount"]
-        payment_id = str(payment["payment_id"])
-        currency = payment["pay_currency"].upper()
+    # Ask for confirmation
+    confirm_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm & Get Address", callback_data=f"confirm_{coin_code}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_topup")
+        ]
+    ])
 
-        # Round to max 2 decimal places
-        display_amount = round(float(pay_amount), 2)
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO pending_payments (payment_id, user_id, amount) VALUES (?, ?, ?)",
-                (payment_id, user_id, amount)
-            )
-            await db.commit()
-
-        qr_url = generate_qr_url(pay_address)
-
-        text = (
-            f"✅ Payment created\n\n"
-            f"Amount to send: **{display_amount} {currency}**\n"
-            f"Network: {COINS.get(coin_code, coin_code)}\n\n"
-            f"**Address (tap to copy):**\n`{pay_address}`\n\n"
-            f"Send exactly the amount above.\n"
-            f"Balance will be credited automatically after confirmation."
-        )
-
-        await query.message.reply_photo(
-            photo=qr_url,
-            caption=text,
-            parse_mode="Markdown"
-        )
-        await query.message.reply_text(
-            "You can return to the main menu anytime.",
-            reply_markup=main_keyboard()
-        )
-
-    except Exception as e:
-        logger.error(f"Payment creation error: {e}")
-        await query.message.reply_text(
-            "❌ Failed to create payment. Please try again later or choose another coin."
-        )
-
-    return ConversationHandler.END
-
+    await query.message.edit_text(
+        f"Confirm top-up:\n\n"
+        f"Amount: **${amount:.2f}**\n"
+        f"Coin: **{COINS.get(coin_code)}**\n"
+        f"You will pay: {estimate_text}\n\n"
+        f"Do you want to continue?",
+        parse_mode="Markdown",
+        reply_markup=confirm_keyboard
+    )
+    return COIN   # stay in the same state
+    
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.", reply_markup=main_keyboard())
     return ConversationHandler.END
@@ -268,6 +281,57 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Contact support: @YourSupportUsername")
     else:
         await update.message.reply_text("Please use the menu buttons.")
+        
+async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cancel_topup":
+        await query.message.reply_text("Top-up cancelled.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    coin_code = query.data.replace("confirm_", "")
+    amount = context.user_data.get("topup_amount")
+    user_id = query.from_user.id
+
+    order_id = f"topup_{user_id}_{int(query.message.date.timestamp())}"
+    ipn_url = os.getenv("IPN_URL", "https://your-service.up.railway.app/ipn")
+
+    try:
+        payment = create_payment(amount, coin_code, order_id, ipn_url)
+        pay_address = payment["pay_address"]
+        pay_amount = payment["pay_amount"]
+        payment_id = str(payment["payment_id"])
+        currency = payment["pay_currency"].upper()
+
+        display_amount = round(float(pay_amount), 2)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO pending_payments (payment_id, user_id, amount) VALUES (?, ?, ?)",
+                (payment_id, user_id, amount)
+            )
+            await db.commit()
+
+        qr_url = generate_qr_url(pay_address)
+
+        text = (
+            f"✅ Payment created\n\n"
+            f"Amount to send: **{display_amount} {currency}**\n"
+            f"Network: {COINS.get(coin_code)}\n\n"
+            f"**Address (tap to copy):**\n`{pay_address}`\n\n"
+            f"Send exactly the amount above.\n"
+            f"Balance will be credited automatically after confirmation."
+        )
+
+        await query.message.reply_photo(photo=qr_url, caption=text, parse_mode="Markdown")
+        await query.message.reply_text("You can return to the main menu.", reply_markup=main_keyboard())
+
+    except Exception as e:
+        logger.error(f"Payment creation error: {e}")
+        await query.message.reply_text("❌ Failed to create payment. Please try again.")
+
+    return ConversationHandler.END
 
 # ==================== IPN WEBHOOK ====================
 async def ipn_handler(request: web.Request):
@@ -286,28 +350,41 @@ async def ipn_handler(request: web.Request):
         logger.info(f"IPN received: {payment_id} → {status}")
 
         if status in ["finished", "confirmed"]:
-            async with aiosqlite.connect(DB_PATH) as db:
-                async with db.execute(
-                    "SELECT user_id, amount, status FROM pending_payments WHERE payment_id = ?",
-                    (payment_id,)
-                ) as cursor:
-                    row = await cursor.fetchone()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id, amount, status FROM pending_payments WHERE payment_id = ?",
+            (payment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
 
-                if row and row[2] != "finished":
-                    user_id, amount, _ = row
-                    await add_balance(user_id, amount)
-                    await db.execute(
-                        "UPDATE pending_payments SET status = 'finished' WHERE payment_id = ?",
-                        (payment_id,)
+        if row and row[2] != "finished":
+            user_id, amount, _ = row
+            await add_balance(user_id, amount)
+            await db.execute(
+                "UPDATE pending_payments SET status = 'finished' WHERE payment_id = ?",
+                (payment_id,)
+            )
+            await db.commit()
+            logger.info(f"Credited ${amount} to user {user_id}")
+
+            # === ADMIN NOTIFICATION ===
+            try:
+                from telegram import Bot
+                bot = Bot(token=BOT_TOKEN)
+                for admin_id in ADMIN_IDS:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=(
+                            f"💰 *New Top-up Received!*\n\n"
+                            f"User ID: `{user_id}`\n"
+                            f"Amount: *${amount:.2f}*\n"
+                            f"Payment ID: `{payment_id}`"
+                        ),
+                        parse_mode="Markdown"
                     )
-                    await db.commit()
-                    logger.info(f"Credited ${amount} to user {user_id}")
-
-        return web.Response(text="OK")
-    except Exception as e:
-        logger.error(f"IPN error: {e}")
-        return web.Response(status=500, text="Error")
-
+            except Exception as e:
+             logger.error(f"Failed to send admin notification: {e}")
+                
 # ==================== MAIN ====================
 async def main():
     await init_db()
@@ -318,9 +395,13 @@ async def main():
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ Top-up$"), topup_start)],
         states={
-            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_amount)],
-            COIN: [CallbackQueryHandler(receive_coin, pattern="^coin_")],
-        },
+    AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_amount)],
+    COIN: [
+        CallbackQueryHandler(receive_coin, pattern="^coin_"),
+        CallbackQueryHandler(confirm_payment, pattern="^confirm_"),
+        CallbackQueryHandler(receive_coin, pattern="^cancel_topup$"),
+    ],
+},
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
