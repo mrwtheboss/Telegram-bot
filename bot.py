@@ -282,8 +282,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🆘 Customer Support\n\n"
         "Please contact: @chenxiang888\n"
-        "Direct link: https://t.me/chenxiang888"
-    )
+        "Direct link: https://t.me/chenxiang888"   )
     else:
         await update.message.reply_text("Please use the menu buttons.")
         
